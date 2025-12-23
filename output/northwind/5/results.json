@@ -1,0 +1,1 @@
+{"input": {"tables_path": "/home/george/Documents/code/vkr/rustbench/tables-qa/set/northwind/5/csv", "question_path": "/home/george/Documents/code/vkr/rustbench/tables-qa/set/northwind/5/QA_english.json"}, "error": "CUDA error: CUBLAS_STATUS_ALLOC_FAILED when calling `cublasCreate(handle)`", "success": false}

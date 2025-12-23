@@ -1,10 +1,290 @@
-import re
-from typing import Dict, List, Optional, Tuple
 import torch
 from sentence_transformers import SentenceTransformer, util
 from collections import defaultdict, deque
 import pandas as pd
 import networkx as nx
+import re
+from typing import Dict, List, Optional, Tuple, Union
+import ast
+
+def parse_column_mapping(mapping: Union[str, List[str]]) -> List[Tuple[str, str]]:
+    """
+    Parse column mapping that could be a single column or multiple columns.
+    Returns list of (table_name, column_name) tuples.
+    """
+    if mapping == "Others":
+        return []
+    
+    if isinstance(mapping, list):
+        mapping_str = " ".join(mapping)
+    else:
+        mapping_str = str(mapping)
+    
+    
+    mapping_str = mapping_str.replace('"', '').replace("'", "").strip()
+    
+    
+    table_column_pairs = []
+    
+    
+    if mapping_str.startswith("[") and mapping_str.endswith("]"):
+        try:
+            items = ast.literal_eval(mapping_str)
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, str) and "." in item:
+                        table, column = item.split(".", 1)
+                        table_column_pairs.append((table.strip(), column.strip()))
+            return table_column_pairs
+        except:
+            pass
+    
+    
+    parts = re.split(r'[,\s]+', mapping_str)
+    for part in parts:
+        part = part.strip()
+        if "." in part:
+            table, column = part.split(".", 1)
+            table_column_pairs.append((table.strip(), column.strip()))
+    
+    return table_column_pairs
+
+def semantic_match(query: str, candidates: List[Tuple], threshold: float = 0.8) -> List[Tuple]:
+    """
+    Semantic matching with table.context support.
+    candidates: list of (text, table_name, column_name, node)
+    """
+    if not candidates:
+        return []
+    
+    model = get_instructor_model()
+    instruction = "Represent the question entity for matching with table cells"
+    
+    candidate_texts = [c[0] for c in candidates]
+    
+    with torch.no_grad():
+        query_emb = model.encode([[instruction, query]], convert_to_tensor=True)
+        cand_embs = model.encode([[instruction, t] for t in candidate_texts], 
+                                convert_to_tensor=True)
+        similarities = util.cos_sim(query_emb, cand_embs)[0]
+    
+    matches = []
+    for i, sim in enumerate(similarities):
+        if sim >= threshold:
+            matches.append((candidates[i], float(sim)))
+    
+    return matches
+
+def prune_and_traverse_multi_table(
+    G: nx.Graph,
+    entity_header_mapping: Dict[str, Union[str, List[str]]],
+    threshold: float = 0.8
+) -> Dict[str, List[str]]:
+    """
+    Multi-table BFS traversal starting from matched entities.
+    Supports multiple columns per entity.
+    """
+    
+    cell_candidates = []
+    
+    for node, attr in G.nodes(data=True):
+        if attr.get("kind") == "cell":
+            text = attr.get("text", "").strip()
+            if text:
+                table = attr.get("table")
+                col = attr.get("col")
+                cell_candidates.append((text, table, col, node))
+    
+    start_nodes = set()
+    
+    
+    for entity, mapping in entity_header_mapping.items():
+        entity = str(entity).strip()
+        if not entity:
+            continue
+        
+        
+        table_column_pairs = parse_column_mapping(mapping)
+        
+        if not table_column_pairs:  
+            
+            matches = semantic_match(entity, cell_candidates, threshold)
+            if matches:
+                best_match = max(matches, key=lambda x: x[1])
+                start_nodes.add(best_match[0][3])  
+        else:
+            
+            for table_name, column_name in table_column_pairs:
+                
+                column_cells = []
+                for text, table, col, node in cell_candidates:
+                    if table == table_name and col == column_name:
+                        column_cells.append((text, table, col, node))
+                
+                if column_cells:
+                    
+                    found = False
+                    for text, table, col, node in column_cells:
+                        if text.lower() == entity.lower():
+                            start_nodes.add(node)
+                            found = True
+                            break
+                    
+                    
+                    if not found:
+                        matches = semantic_match(entity, column_cells, threshold)
+                        if matches:
+                            best_match = max(matches, key=lambda x: x[1])
+                            start_nodes.add(best_match[0][3])
+    
+    
+    hop_dict = defaultdict(list)
+    if not start_nodes:
+        return {"1-hop": [], "2-hop": [], "3-hop": []}
+    
+    visited = set(start_nodes)
+    queue = deque([(node, 0) for node in start_nodes])
+    
+    while queue:
+        node, hop = queue.popleft()
+        if hop >= 3:
+            continue
+        
+        
+        attr = G.nodes[node]
+        if attr.get("kind") == "cell":
+            text = attr.get("text", "")
+            table = attr.get("table")
+            col = attr.get("col")
+            if text and table and col:
+                hop_dict[f"{hop+1}-hop"].append(f"{text}; {table}.{col}")
+        
+        
+        for neighbor in G.neighbors(node):
+            if neighbor not in visited:
+                visited.add(neighbor)
+                queue.append((neighbor, hop + 1))
+    
+    
+    for hop in ["1-hop", "2-hop", "3-hop"]:
+        if hop not in hop_dict:
+            hop_dict[hop] = []
+    
+    return dict(hop_dict)
+
+
+def semantic_match(query: str, candidates: List[Tuple], threshold: float = 0.8) -> List[Tuple]:
+    """
+    Semantic matching with table.context support.
+    candidates: list of (text, table_name, column_name, node)
+    """
+    if not candidates:
+        return []
+    
+    model = get_instructor_model()
+    instruction = "Represent the question entity for matching with table cells"
+    
+    candidate_texts = [c[0] for c in candidates]
+    
+    with torch.no_grad():
+        query_emb = model.encode([[instruction, query]], convert_to_tensor=True)
+        cand_embs = model.encode([[instruction, t] for t in candidate_texts], 
+                                convert_to_tensor=True)
+        similarities = util.cos_sim(query_emb, cand_embs)[0]
+    
+    matches = []
+    for i, sim in enumerate(similarities):
+        if sim >= threshold:
+            matches.append((candidates[i], float(sim)))
+    
+    return matches
+
+def prune_and_traverse_multi_table(
+    G: nx.Graph,
+    entity_header_mapping: Dict[str, str],  
+    threshold: float = 0.8
+) -> Dict[str, List[str]]:
+    """
+    Multi-table BFS traversal starting from matched entities.
+    """
+    
+    cell_candidates = []
+    cell_nodes = []
+    
+    for node, attr in G.nodes(data=True):
+        if attr.get("kind") == "cell":
+            text = attr.get("text", "").strip()
+            if text:
+                table = attr.get("table")
+                col = attr.get("col")
+                cell_candidates.append((text, table, col, node))
+                cell_nodes.append(node)
+    
+    start_nodes = set()
+    
+    
+    for entity, mapping in entity_header_mapping.items():
+        if mapping == "Others":
+            
+            matches = semantic_match(entity, cell_candidates, threshold)
+            if matches:
+                best_match = max(matches, key=lambda x: x[1])
+                start_nodes.add(best_match[0][3])  
+        else:
+            
+            table_name, column_name = mapping[0].split(".")
+            
+            
+            column_cells = []
+            for text, table, col, node in cell_candidates:
+                if table == table_name and col == column_name:
+                    column_cells.append((text, table, col, node))
+            
+            if column_cells:
+                
+                found = False
+                for text, table, col, node in column_cells:
+                    if text.lower() == entity.lower():
+                        start_nodes.add(node)
+                        found = True
+                        break
+                
+                
+                if not found:
+                    matches = semantic_match(entity, column_cells, threshold)
+                    if matches:
+                        best_match = max(matches, key=lambda x: x[1])
+                        start_nodes.add(best_match[0][3])
+    
+    
+    hop_dict = defaultdict(list)
+    if not start_nodes:
+        return {"1-hop": [], "2-hop": [], "3-hop": []}
+    
+    visited = set(start_nodes)
+    queue = deque([(node, 0) for node in start_nodes])
+    
+    while queue:
+        node, hop = queue.popleft()
+        if hop >= 3:
+            continue
+        
+        
+        attr = G.nodes[node]
+        if attr.get("kind") == "cell":
+            text = attr.get("text", "")
+            table = attr.get("table")
+            col = attr.get("col")
+            if text and table and col:
+                hop_dict[f"{hop+1}-hop"].append(f"{text}; {table}.{col}")
+        
+        
+        for neighbor in G.neighbors(node):
+            if neighbor not in visited:
+                visited.add(neighbor)
+                queue.append((neighbor, hop + 1))
+    
+    return dict(hop_dict)
 
 
 def remove_think_blocks(text: str) -> str:
@@ -52,7 +332,7 @@ def extract_subtable_from_hop(hop_list: List[str], table_df: pd.DataFrame) -> pd
         if link_col in table_df.columns:
             cols_to_keep.add(link_col)
 
-    cols_to_keep = sorted(cols_to_keep, key=lambda x: list(table_df.columns).index(x))  # сохранить порядок
+    cols_to_keep = sorted(cols_to_keep, key=lambda x: list(table_df.columns).index(x))  
 
     mask = pd.Series([False] * len(table_df), index=table_df.index)
     for value, col in cell_mentions:
@@ -74,44 +354,6 @@ def get_instructor_model() -> SentenceTransformer:
     return _instructor_model
 
 
-def semantic_match(query: str, candidates: list, threshold: float = 0.8) -> List[Tuple[str, float]]:
-    """
-    Performs semantic matching between a query and a list of candidates using SentenceTransformers.
-    """
-    if not candidates:
-        return []
-
-    model = get_instructor_model()
-    device = model.device
-
-    instruction = "Represent the question entity for matching with table cells or document entities"
-
-    with torch.no_grad():
-        query_emb = model.encode(
-            [[instruction, query]],
-            convert_to_tensor=True,
-            device=device
-        )
-
-        candidate_embs = model.encode(
-            [[instruction, cand] for cand in candidates],
-            convert_to_tensor=True,
-            device=device
-        )
-
-        similarities = util.cos_sim(query_emb, candidate_embs)[0]
-
-    matches = []
-    for i, sim in enumerate(similarities):
-        if sim >= threshold:
-            matches.append((candidates[i], float(sim)))
-    
-    del query_emb, candidate_embs, similarities
-    torch.cuda.empty_cache()
-    
-    return matches
-
-
 def format_node_for_output(G: nx.Graph, node, headers: List[str]) -> Optional[str]:
     """
     Formats a graph node for output based on its type (cell or entity).
@@ -128,109 +370,3 @@ def format_node_for_output(G: nx.Graph, node, headers: List[str]) -> Optional[st
         if text:
             return text
     return None
-
-
-def prune_and_traverse_hybrid_graph(G: nx.Graph, entity_header_mapping: Dict[str, str], headers: List[str], threshold: float = 0.8) -> Optional[Dict[str, List[str]]]:
-    """
-    Prunes and traverses the hybrid graph to find relevant information starting from initial nodes.
-    """
-    entity_total_list = []
-    entity_to_node = {}
-    for node, attr in G.nodes(data=True):
-        if attr.get("kind") == "ent":
-            text = attr.get("text", "").strip()
-            if text:
-                entity_total_list.append(text)
-                entity_to_node[text] = node
-
-    def top1_semantic_match(query, candidates, threshold=0.8) -> Optional[Tuple[str, float]]:
-        if not candidates:
-            return None
-        matches = semantic_match(query, candidates, threshold=threshold)
-        if not matches:
-            return None
-        matches = sorted(matches, key=lambda x: x[1], reverse=True)
-        cand, score = matches[0]
-        return (cand, score) if score >= threshold else None
-
-    start_nodes = set()
-
-    for question_entity, mapped_header in entity_header_mapping.items():
-        q = str(question_entity).strip()
-        if not q:
-            continue
-
-        if mapped_header == "Others":
-            tm = top1_semantic_match(q, entity_total_list, threshold)
-            if tm:
-                ent_text, _ = tm
-                node = entity_to_node.get(ent_text)
-                if node and G.has_node(node):
-                    start_nodes.add(node)
-
-        else:
-            if mapped_header not in headers:
-                continue
-
-            cell_texts, cell_nodes = [], []
-            for node, attr in G.nodes(data=True):
-                if attr.get("kind") == "cell" and attr.get("col") == mapped_header:
-                    text = str(attr.get("text", "")).strip()
-                    if text:
-                        cell_texts.append(text)
-                        cell_nodes.append(node)
-
-            tm = top1_semantic_match(q, cell_texts, threshold)
-            if tm:
-                best_text, _ = tm
-                try:
-                    idx = cell_texts.index(best_text)
-                    start_nodes.add(cell_nodes[idx])
-                except ValueError:
-                    pass
-            else:
-                all_texts, all_nodes = [], []
-                for node, attr in G.nodes(data=True):
-                    if attr.get("kind") == "cell":
-                        t = str(attr.get("text", "")).strip()
-                        if t:
-                            all_texts.append(t)
-                            all_nodes.append(node)
-                tm2 = top1_semantic_match(q, all_texts, threshold)
-                if tm2:
-                    best_text, _ = tm2
-                    try:
-                        idx = all_texts.index(best_text)
-                        start_nodes.add(all_nodes[idx])
-                    except ValueError:
-                        pass
-
-    if not start_nodes:
-        return None
-    print(start_nodes)
-    hop_dict = defaultdict(list)
-    visited = set(start_nodes)
-    queue = deque([(node, 0) for node in start_nodes])
-
-    while queue:
-        node, hop = queue.popleft()
-        if hop >= 3:
-            continue
-
-        next_hop = hop + 1
-        for neighbor in G.neighbors(node):
-            if neighbor in visited:
-                continue
-
-            visited.add(neighbor)
-            queue.append((neighbor, next_hop))
-
-            formatted = format_node_for_output(G, neighbor, headers)
-            if formatted:
-                hop_dict[f"{next_hop}-hop"].append(formatted)
-
-    return {
-        "1-hop": hop_dict["1-hop"],
-        "2-hop": hop_dict["2-hop"],
-        "3-hop": hop_dict["3-hop"]
-    }

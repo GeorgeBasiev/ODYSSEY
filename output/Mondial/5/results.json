@@ -1,0 +1,1 @@
+{"input": {"tables_path": "/home/george/Documents/code/vkr/rustbench/tables-qa/set/Mondial/5/csv", "question_path": "/home/george/Documents/code/vkr/rustbench/tables-qa/set/Mondial/5/QA_english.json"}, "answers": "No data found", "contexts": {"1-hop": "", "2-hop": "", "3-hop": ""}, "success": true}
