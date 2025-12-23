@@ -3,7 +3,7 @@ WikiTables-WithLinks
 preprocessed_for_hybrid_graphs
 preprocessed_data
 preprocessed_data.zip
-json_inputs
+./json_inputs
 __pycache__
 data
 .env

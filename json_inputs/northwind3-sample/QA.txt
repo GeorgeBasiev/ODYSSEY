@@ -1,2 +1,0 @@
-Q:How many unique orders were placed by US customers that were processed by Seattle-based employees?
-A:(40,)
